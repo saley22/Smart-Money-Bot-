@@ -101,8 +101,7 @@ def detect_signal(df):
     2. Hemen sonraki İLK mum (likidite mumu):
        - Ana mumun low'unu kırmalı (low < ana_low)  → likidite aldı
        - Gövdesiyle ana mumun gövdesi içinde kapanmalı (ana_close <= close <= ana_open)
-    3. Likidite mumundan sonraki mumlardan herhangi biri:
-       - Ana mumun high'ının ÜSTÜNDE kapanırsa (close > ana_high) → LONG SİNYALİ
+    3. En son kapanan mum ana mumun high'ının ÜSTÜNDE kaparsa → LONG SİNYALİ
        - Giriş = ana mumun high'ı
 
     ── SHORT SİNYALİ ──
@@ -110,12 +109,13 @@ def detect_signal(df):
     2. Hemen sonraki İLK mum (likidite mumu):
        - Ana mumun high'ını kırmalı (high > ana_high)  → likidite aldı
        - Gövdesiyle ana mumun gövdesi içinde kapanmalı (ana_open <= close <= ana_close)
-    3. Likidite mumundan sonraki mumlardan herhangi biri:
-       - Ana mumun low'unun ALTINDA kapanırsa (close < ana_low) → SHORT SİNYALİ
+    3. En son kapanan mum ana mumun low'unun ALTINDA kaparsa → SHORT SİNYALİ
        - Giriş = ana mumun low'u
     """
     if df.empty:
         return None, None
+
+    son_mum = df.iloc[-1]  # En son kapanan mum
 
     # En az 3 mum gerekli: ana mum + likidite mumu + kırılım mumu
     for i in range(len(df) - 3, 0, -1):
@@ -136,41 +136,35 @@ def detect_signal(df):
         if ana["close"] < ana["open"]:
             ana_high  = ana["high"]
             ana_low   = ana["low"]
-            ana_open  = ana["open"]   # Kırmızı mumda open üstte
-            ana_close = ana["close"]  # Kırmızı mumda close altta
+            ana_open  = ana["open"]
+            ana_close = ana["close"]
 
             # Şart 1: Likidite mumu ana mumun low'unu kırmalı
             likit_alindi = likit["low"] < ana_low
 
             # Şart 2: Likidite mumunun close'u ana mumun gövdesi içinde olmalı
-            # Kırmızı mum gövdesi: ana_close (alt) ile ana_open (üst) arasında
-            gövde_içinde = ana_close <= likit["close"] <= ana_open
+            govde_icinde = ana_close <= likit["close"] <= ana_open
 
-            if likit_alindi and gövde_içinde:
-                # Şart 3: Sonraki mumlardan biri ana high'ın üstünde kapanmalı
-                for j in range(i + 2, len(df)):
-                    if df.iloc[j]["close"] > ana_high:
-                        return "long", ana_high
+            # Şart 3: En son kapanan mum ana high'ın üstünde kapatmalı
+            if likit_alindi and govde_icinde and son_mum["close"] > ana_high:
+                return "long", ana_high
 
         # ── SHORT (Yeşil ana mum) ──
         elif ana["close"] > ana["open"]:
             ana_high  = ana["high"]
             ana_low   = ana["low"]
-            ana_open  = ana["open"]   # Yeşil mumda open altta
-            ana_close = ana["close"]  # Yeşil mumda close üstte
+            ana_open  = ana["open"]
+            ana_close = ana["close"]
 
             # Şart 1: Likidite mumu ana mumun high'ını kırmalı
             likit_alindi = likit["high"] > ana_high
 
             # Şart 2: Likidite mumunun close'u ana mumun gövdesi içinde olmalı
-            # Yeşil mum gövdesi: ana_open (alt) ile ana_close (üst) arasında
-            gövde_içinde = ana_open <= likit["close"] <= ana_close
+            govde_icinde = ana_open <= likit["close"] <= ana_close
 
-            if likit_alindi and gövde_içinde:
-                # Şart 3: Sonraki mumlardan biri ana low'un altında kapanmalı
-                for j in range(i + 2, len(df)):
-                    if df.iloc[j]["close"] < ana_low:
-                        return "short", ana_low
+            # Şart 3: En son kapanan mum ana low'un altında kapatmalı
+            if likit_alindi and govde_icinde and son_mum["close"] < ana_low:
+                return "short", ana_low
 
     return None, None
 
