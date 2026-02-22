@@ -1,7 +1,7 @@
 """
 =============================================================
   LİKİDİTE KAPMA SİNYAL BOTU
-  - Binance Futures Top 50 Hacim Tarayıcı
+  - CoinGecko + Binance Futures Top 50 Hacim Tarayıcı
   - Zaman Dilimleri: 1H / 2H / 4H
   - Telegram Bildirim
   - Her 10 dakikada bir tarama
@@ -26,11 +26,12 @@ TIMEFRAMES = {
     "4H": "4h",
 }
 
-MIN_BODY_PCT = 0.003  # Ana mumun minimum gövde büyüklüğü (%0.3)
-TOP_N        = 50     # Kaç coin taransın
-SCAN_EVERY   = 600    # Kaç saniyede bir tarama (600 = 10 dakika)
+MIN_BODY_PCT = 0.003
+TOP_N        = 50
+SCAN_EVERY   = 600
 
 BINANCE_BASE = "https://fapi.binance.com"
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 # ─────────────────────────────────────────
 #  LOGGING
@@ -69,27 +70,44 @@ def send_telegram(message: str):
 
 # ─────────────────────────────────────────
 #  EN HACİMLİ 50 COİNİ ÇEK
+#  CoinGecko hacim sıralaması + Binance Futures filtresi
 # ─────────────────────────────────────────
 def get_top_symbols(n=TOP_N):
     try:
-        resp = requests.get(f"{BINANCE_BASE}/fapi/v1/ticker/24hr", timeout=10)
-        tickers = resp.json()
-        if isinstance(tickers, dict):
-            tickers = [tickers]
-        usdt_pairs = [
-            t for t in tickers
-            if isinstance(t, dict)
-            and t.get("symbol", "").endswith("USDT")
-            and "_" not in t.get("symbol", "")
-        ]
-        sorted_pairs = sorted(
-            usdt_pairs,
-            key=lambda x: float(x.get("quoteVolume", 0)),
-            reverse=True
+        # 1. Binance Futures'da aktif işlem gören tüm sembolleri al
+        futures_resp = requests.get(f"{BINANCE_BASE}/fapi/v1/exchangeInfo", timeout=10)
+        futures_symbols = set(
+            s["symbol"] for s in futures_resp.json().get("symbols", [])
+            if s["symbol"].endswith("USDT") and s.get("status") == "TRADING"
         )
-        symbols = [t["symbol"] for t in sorted_pairs[:n]]
-        log.info(f"📊 Top {n} coin alındı. İlk 5: {symbols[:5]}")
+        log.info(f"Binance Futures aktif sembol sayısı: {len(futures_symbols)}")
+
+        # 2. CoinGecko'dan hacme göre sıralı coin listesi al
+        cg_resp = requests.get(
+            f"{COINGECKO_BASE}/coins/markets",
+            params={
+                "vs_currency": "usd",
+                "order": "volume_desc",
+                "per_page": 250,
+                "page": 1,
+                "sparkline": "false"
+            },
+            timeout=15
+        )
+        coins = cg_resp.json()
+
+        # 3. CoinGecko listesinden Binance Futures'da olanları filtrele
+        symbols = []
+        for coin in coins:
+            sym = coin["symbol"].upper() + "USDT"
+            if sym in futures_symbols:
+                symbols.append(sym)
+            if len(symbols) >= n:
+                break
+
+        log.info(f"📊 Top {len(symbols)} coin alındı (CoinGecko). İlk 5: {symbols[:5]}")
         return symbols
+
     except Exception as e:
         log.error(f"Sembol listesi alınamadı: {e}")
         return []
@@ -126,13 +144,13 @@ def detect_signal(df):
     """
     SHORT:
       1. Yeşil ana mum (i)
-      2. Hemen sonraki mum (i+1): high > ana mumun high → likidite alındı
+      2. Hemen sonraki mum (i+1) KIRMIZI olmalı ve high > ana mumun high (likidite alındı)
       3. i+2'den itibaren herhangi bir mum: close < ana mumun low → SİNYAL
       Giriş: ana mumun low
 
     LONG:
       1. Kırmızı ana mum (i)
-      2. Hemen sonraki mum (i+1): low < ana mumun low → likidite alındı
+      2. Hemen sonraki mum (i+1) YEŞİL olmalı ve low < ana mumun low (likidite alındı)
       3. i+2'den itibaren herhangi bir mum: close > ana mumun high → SİNYAL
       Giriş: ana mumun high
     """
@@ -153,9 +171,8 @@ def detect_signal(df):
             ref_high = candle["high"]
             ref_low  = candle["low"]
 
-            # Hemen sonraki mum KIRMIZI olmalı ve high'ı geçmeli
+            # Hemen sonraki mum KIRMIZI ve high'ı geçiyor mu?
             if next_candle["close"] < next_candle["open"] and next_candle["high"] > ref_high:
-                # i+2'den itibaren kırılım var mı?
                 for k in range(i + 2, len(df)):
                     if df.iloc[k]["close"] < ref_low:
                         return "short", ref_low
@@ -165,9 +182,8 @@ def detect_signal(df):
             ref_low  = candle["low"]
             ref_high = candle["high"]
 
-            # Hemen sonraki mum YEŞİL olmalı ve low'u geçmeli
+            # Hemen sonraki mum YEŞİL ve low'u geçiyor mu?
             if next_candle["close"] > next_candle["open"] and next_candle["low"] < ref_low:
-                # i+2'den itibaren kırılım var mı?
                 for k in range(i + 2, len(df)):
                     if df.iloc[k]["close"] > ref_high:
                         return "long", ref_high
@@ -204,6 +220,7 @@ def run_scan():
 
     symbols = get_top_symbols(TOP_N)
     if not symbols:
+        log.error("Coin listesi boş, tarama atlandı.")
         return
 
     found = 0
