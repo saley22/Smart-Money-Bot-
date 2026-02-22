@@ -96,24 +96,26 @@ def get_candles(symbol, interval):
 
 def detect_signal(df):
     """
-    Sadece en son 3+ kapanmış muma bakar, geçmişe gitmez.
-
     LONG:
     1. Kırmızı ana mum
     2. Hemen sonraki ilk mum: low'unu kırar + ana mumun gövdesi içinde kapanır
-    3. Likidite sonrası hiçbir mum ana mumun ALTINDA kapanmamalı
-    4. En son kapanan mum ana mumun HIGH'ının üstünde kaparsa → LONG sinyali
+    3. Ana mumun gövdesi, likidite mumunun gövdesinden en az 2 kat büyük olmalı
+    4. Likidite sonrası hiçbir mum ana mumun ALTINDA kapanmamalı
+    5. Likidite sonrası en fazla 15 mum içinde kırılım olmalı
+    6. En son kapanan mum ana mumun HIGH'ının üstünde kaparsa → LONG sinyali
 
     SHORT:
     1. Yeşil ana mum
     2. Hemen sonraki ilk mum: high'ını kırar + ana mumun gövdesi içinde kapanır
-    3. Likidite sonrası hiçbir mum ana mumun ÜSTÜNDE kapanmamalı
-    4. En son kapanan mum ana mumun LOW'unun altında kaparsa → SHORT sinyali
+    3. Ana mumun gövdesi, likidite mumunun gövdesinden en az 2 kat büyük olmalı
+    4. Likidite sonrası hiçbir mum ana mumun ÜSTÜNDE kapanmamalı
+    5. Likidite sonrası en fazla 15 mum içinde kırılım olmalı
+    6. En son kapanan mum ana mumun LOW'unun altında kaparsa → SHORT sinyali
     """
     if df.empty or len(df) < 3:
         return None, None
 
-    son_mum = df.iloc[-1]  # En son kapanan mum (kırılım mumu)
+    son_mum = df.iloc[-1]  # En son kapanan mum
 
     # Geriye doğru sadece 15 mum içinde ara
     baslangic = max(1, len(df) - 17)
@@ -126,10 +128,18 @@ def detect_signal(df):
         if body_size < MIN_BODY_PCT:
             continue
 
-        likit = df.iloc[i + 1]  # Likidite mumu (ana mumdan hemen sonraki)
+        likit = df.iloc[i + 1]  # Likidite mumu
 
         # Likidite ile kırılım arasında en fazla 15 mum olmalı
         if (len(df) - 1) - (i + 1) > 15:
+            continue
+
+        # Ana mumun ve likidite mumunun gövde büyüklükleri
+        ana_govde   = abs(ana["close"] - ana["open"])
+        likit_govde = abs(likit["close"] - likit["open"])
+
+        # Ana mumun gövdesi likidite mumunun en az 2 katı olmalı
+        if likit_govde == 0 or ana_govde < likit_govde * 2:
             continue
 
         # ── LONG (Kırmızı ana mum) ──
@@ -145,13 +155,12 @@ def detect_signal(df):
             if not (likit_alindi and govde_icinde):
                 continue
 
-            # Likidite sonrası (kırılım mumu hariç) hiçbir mum ana low'un altında kapanmamalı
+            # Likidite sonrası hiçbir mum ana low'un altında kapanmamalı
             sonraki_mumlar = df.iloc[i + 2: len(df) - 1]
             gecersiz = any(sonraki_mumlar.iloc[k]["close"] < ana_low for k in range(len(sonraki_mumlar)))
             if gecersiz:
                 continue
 
-            # En son kapanan mum ana high'ın üstünde kapatmalı
             if son_mum["close"] > ana_high:
                 return "long", ana_high
 
@@ -168,13 +177,12 @@ def detect_signal(df):
             if not (likit_alindi and govde_icinde):
                 continue
 
-            # Likidite sonrası (kırılım mumu hariç) hiçbir mum ana high'ın üstünde kapanmamalı
+            # Likidite sonrası hiçbir mum ana high'ın üstünde kapanmamalı
             sonraki_mumlar = df.iloc[i + 2: len(df) - 1]
             gecersiz = any(sonraki_mumlar.iloc[k]["close"] > ana_high for k in range(len(sonraki_mumlar)))
             if gecersiz:
                 continue
 
-            # En son kapanan mum ana low'un altında kapatmalı
             if son_mum["close"] < ana_low:
                 return "short", ana_low
 
