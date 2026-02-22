@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 import requests
@@ -10,19 +11,19 @@ logging.basicConfig(
 )
 log = logging.getLogger()
 
-TELEGRAM_TOKEN   = "8407067459:AAGgGmH9jA6TwWHY-H62n6s9SKl3Bv0r1Mg"
-TELEGRAM_CHAT_ID = "623705923"
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 TIMEFRAMES = {
-    "1H":  "60",
-    "2H":  "120",
-    "4H":  "240",
+    "1H": "1h",
+    "2H": "2h",
+    "4H": "4h",
 }
 
-MIN_BODY_PCT = 0.003
-TOP_N        = 100
-SCAN_EVERY   = 600
-BYBIT_BASE   = "https://api.bybit.com"
+MIN_BODY_PCT  = 0.003   # Ana mumun minimum gövde büyüklüğü (%)
+TOP_N         = 60      # Taranacak coin sayısı (en hacimli 60)
+SCAN_EVERY    = 120     # Tarama sıklığı (saniye) - 2 dakika
+BINANCE_BASE  = "https://fapi.binance.com"
 
 sent_signals = {}
 
@@ -46,19 +47,17 @@ def send_telegram(message):
 def get_top_symbols():
     try:
         resp = requests.get(
-            f"{BYBIT_BASE}/v5/market/tickers",
-            params={"category": "linear"},
+            f"{BINANCE_BASE}/fapi/v1/ticker/24hr",
             timeout=10
         )
-        data = resp.json()
-        tickers = data["result"]["list"]
+        tickers = resp.json()
         usdt_pairs = [
             t for t in tickers
             if t["symbol"].endswith("USDT") and "_" not in t["symbol"]
         ]
         sorted_pairs = sorted(
             usdt_pairs,
-            key=lambda x: float(x.get("turnover24h", 0)),
+            key=lambda x: float(x.get("quoteVolume", 0)),
             reverse=True
         )
         symbols = [t["symbol"] for t in sorted_pairs[:TOP_N]]
@@ -72,21 +71,19 @@ def get_top_symbols():
 def get_candles(symbol, interval):
     try:
         resp = requests.get(
-            f"{BYBIT_BASE}/v5/market/kline",
+            f"{BINANCE_BASE}/fapi/v1/klines",
             params={
-                "category": "linear",
                 "symbol": symbol,
                 "interval": interval,
                 "limit": 100
             },
             timeout=10
         )
-        data = resp.json()
-        raw = data["result"]["list"]
-        raw = raw[::-1]  # Bybit en yeni mumu başa koyar, ters çevir
-
+        raw = resp.json()
         df = pd.DataFrame(raw, columns=[
-            "open_time", "open", "high", "low", "close", "volume", "turnover"
+            "open_time", "open", "high", "low", "close",
+            "volume", "close_time", "quote_volume", "trades",
+            "taker_buy_base", "taker_buy_quote", "ignore"
         ])
         for col in ["open", "high", "low", "close"]:
             df[col] = df[col].astype(float)
@@ -100,55 +97,81 @@ def get_candles(symbol, interval):
 
 def detect_signal(df):
     """
-    LONG:
-      - Kırmızı ana mum (close < open)
-      - Sonraki mumlardan biri: low < ana low VE yeşil kapanmalı (close > open)  → likidite alındı
-      - Daha sonra: close > ana high → LONG SİNYALİ, giriş = ana high
+    ── LONG SİNYALİ ──
+    1. Ana mum: KIRMIZI (close < open), yeterli gövde büyüklüğüne sahip
+    2. Hemen sonraki İLK mum (likidite mumu):
+       - Ana mumun low'unu kırmalı (low < ana_low)  → likidite aldı
+       - Gövdesiyle ana mumun gövdesi içinde kapanmalı (ana_close <= close <= ana_open)
+    3. Likidite mumundan sonraki mumlardan herhangi biri:
+       - Ana mumun high'ının ÜSTÜNDE kapanırsa (close > ana_high) → LONG SİNYALİ
+       - Giriş = ana mumun high'ı
 
-    SHORT:
-      - Yeşil ana mum (close > open)
-      - Sonraki mumlardan biri: high > ana high VE kırmızı kapanmalı (close < open) → likidite alındı
-      - Daha sonra: close < ana low → SHORT SİNYALİ, giriş = ana low
+    ── SHORT SİNYALİ ──
+    1. Ana mum: YEŞİL (close > open), yeterli gövde büyüklüğüne sahip
+    2. Hemen sonraki İLK mum (likidite mumu):
+       - Ana mumun high'ını kırmalı (high > ana_high)  → likidite aldı
+       - Gövdesiyle ana mumun gövdesi içinde kapanmalı (ana_open <= close <= ana_close)
+    3. Likidite mumundan sonraki mumlardan herhangi biri:
+       - Ana mumun low'unun ALTINDA kapanırsa (close < ana_low) → SHORT SİNYALİ
+       - Giriş = ana mumun low'u
     """
     if df.empty:
         return None, None
 
+    # En az 3 mum gerekli: ana mum + likidite mumu + kırılım mumu
     for i in range(len(df) - 3, 0, -1):
-        candle = df.iloc[i]
-        body_size = abs(candle["close"] - candle["open"]) / candle["open"]
+        ana = df.iloc[i]
 
+        # Ana mumun gövde büyüklüğü kontrolü
+        body_size = abs(ana["close"] - ana["open"]) / ana["open"]
         if body_size < MIN_BODY_PCT:
             continue
 
-        # ── LONG (Kırmızı ana mum) ──
-        if candle["close"] < candle["open"]:
-            ref_low  = candle["low"]
-            ref_high = candle["high"]
-            liquidity_taken = False
+        # Sonraki mum var mı kontrol et
+        if i + 2 >= len(df):
+            continue
 
-            for j in range(i + 1, len(df)):
-                if not liquidity_taken:
-                    if (df.iloc[j]["low"] < ref_low and
-                            df.iloc[j]["close"] > df.iloc[j]["open"]):
-                        liquidity_taken = True
-                else:
-                    if df.iloc[j]["close"] > ref_high:
-                        return "long", ref_high
+        likit = df.iloc[i + 1]  # Likidite mumu (ana mumdan hemen sonraki İLK mum)
+
+        # ── LONG (Kırmızı ana mum) ──
+        if ana["close"] < ana["open"]:
+            ana_high  = ana["high"]
+            ana_low   = ana["low"]
+            ana_open  = ana["open"]   # Kırmızı mumda open üstte
+            ana_close = ana["close"]  # Kırmızı mumda close altta
+
+            # Şart 1: Likidite mumu ana mumun low'unu kırmalı
+            likit_alindi = likit["low"] < ana_low
+
+            # Şart 2: Likidite mumunun close'u ana mumun gövdesi içinde olmalı
+            # Kırmızı mum gövdesi: ana_close (alt) ile ana_open (üst) arasında
+            gövde_içinde = ana_close <= likit["close"] <= ana_open
+
+            if likit_alindi and gövde_içinde:
+                # Şart 3: Sonraki mumlardan biri ana high'ın üstünde kapanmalı
+                for j in range(i + 2, len(df)):
+                    if df.iloc[j]["close"] > ana_high:
+                        return "long", ana_high
 
         # ── SHORT (Yeşil ana mum) ──
-        elif candle["close"] > candle["open"]:
-            ref_high = candle["high"]
-            ref_low  = candle["low"]
-            liquidity_taken = False
+        elif ana["close"] > ana["open"]:
+            ana_high  = ana["high"]
+            ana_low   = ana["low"]
+            ana_open  = ana["open"]   # Yeşil mumda open altta
+            ana_close = ana["close"]  # Yeşil mumda close üstte
 
-            for j in range(i + 1, len(df)):
-                if not liquidity_taken:
-                    if (df.iloc[j]["high"] > ref_high and
-                            df.iloc[j]["close"] < df.iloc[j]["open"]):
-                        liquidity_taken = True
-                else:
-                    if df.iloc[j]["close"] < ref_low:
-                        return "short", ref_low
+            # Şart 1: Likidite mumu ana mumun high'ını kırmalı
+            likit_alindi = likit["high"] > ana_high
+
+            # Şart 2: Likidite mumunun close'u ana mumun gövdesi içinde olmalı
+            # Yeşil mum gövdesi: ana_open (alt) ile ana_close (üst) arasında
+            gövde_içinde = ana_open <= likit["close"] <= ana_close
+
+            if likit_alindi and gövde_içinde:
+                # Şart 3: Sonraki mumlardan biri ana low'un altında kapanmalı
+                for j in range(i + 2, len(df)):
+                    if df.iloc[j]["close"] < ana_low:
+                        return "short", ana_low
 
     return None, None
 
@@ -204,12 +227,15 @@ def run_scan():
 
 
 def main():
-    log.info("LİKİDİTE KAPMA SİNYAL BOTU BAŞLADI - BYBIT")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        raise ValueError("TELEGRAM_TOKEN ve TELEGRAM_CHAT_ID environment variable olarak tanımlanmalı!")
+
+    log.info("LİKİDİTE KAPMA SİNYAL BOTU BAŞLADI - BİNANCE")
     log.info(f"Top {TOP_N} Coin | 1H / 2H / 4H | Her {SCAN_EVERY // 60} dakikada bir")
 
     send_telegram(
         "🤖 <b>Likidite Kapma Sinyal Botu Başladı</b>\n"
-        f"📊 Bybit Top {TOP_N} coin taranıyor\n"
+        f"📊 Binance Top {TOP_N} coin taranıyor\n"
         f"⏱ Zaman Dilimleri: <b>1H / 2H / 4H</b>\n"
         f"🔄 Her {SCAN_EVERY // 60} dakikada bir tarama"
     )
