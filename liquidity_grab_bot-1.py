@@ -7,13 +7,6 @@
   - Her 10 dakikada bir tarama
   - API KEY GEREKMİYOR
 =============================================================
-
-KURULUM:
-  pip install requests pandas --user
-
-ÇALIŞTIRMA:
-  python liquidity_grab_bot.py
-=============================================================
 """
 
 import time
@@ -52,8 +45,7 @@ logging.basicConfig(
 )
 log = logging.getLogger()
 
-# Tekrar bildirim önleme
-sent_signals = {}  # {symbol_tf: (signal, entry_price)}
+sent_signals = {}
 
 
 # ─────────────────────────────────────────
@@ -76,17 +68,14 @@ def send_telegram(message: str):
 
 
 # ─────────────────────────────────────────
-#  EN HACİMLİ 50 COİNİ ÇEK (API KEY YOK)
+#  EN HACİMLİ 50 COİNİ ÇEK
 # ─────────────────────────────────────────
 def get_top_symbols(n=TOP_N):
     try:
         resp = requests.get(f"{BINANCE_BASE}/fapi/v1/ticker/24hr", timeout=10)
         tickers = resp.json()
-
-        # Bazen Binance tek dict döndürür, liste olmasını garantile
         if isinstance(tickers, dict):
             tickers = [tickers]
-
         usdt_pairs = [
             t for t in tickers
             if isinstance(t, dict)
@@ -107,7 +96,7 @@ def get_top_symbols(n=TOP_N):
 
 
 # ─────────────────────────────────────────
-#  MUM VERİSİ ÇEK (API KEY YOK)
+#  MUM VERİSİ ÇEK
 # ─────────────────────────────────────────
 def get_candles(symbol, interval):
     try:
@@ -135,17 +124,17 @@ def get_candles(symbol, interval):
 # ─────────────────────────────────────────
 def detect_signal(df):
     """
-    LONG:
-      - Kırmızı ana mum (i)
-      - Herhangi bir j > i: low < ana mumun low  → likidite alındı
-      - Herhangi bir k > j: close > ana mumun high → SİNYAL
-      - Limit giriş: ana mumun high
-
     SHORT:
-      - Yeşil ana mum (i)
-      - Herhangi bir j > i: high > ana mumun high → likidite alındı
-      - Herhangi bir k > j: close < ana mumun low  → SİNYAL
-      - Limit giriş: ana mumun low
+      1. Yeşil ana mum (i)
+      2. Hemen sonraki mum (i+1): high > ana mumun high → likidite alındı
+      3. i+2'den itibaren herhangi bir mum: close < ana mumun low → SİNYAL
+      Giriş: ana mumun low
+
+    LONG:
+      1. Kırmızı ana mum (i)
+      2. Hemen sonraki mum (i+1): low < ana mumun low → likidite alındı
+      3. i+2'den itibaren herhangi bir mum: close > ana mumun high → SİNYAL
+      Giriş: ana mumun high
     """
     if df.empty:
         return None, None
@@ -157,33 +146,31 @@ def detect_signal(df):
         if body_size < MIN_BODY_PCT:
             continue
 
-        # ── LONG (Kırmızı ana mum) ──
-        if candle["close"] < candle["open"]:
-            ref_low  = candle["low"]
-            ref_high = candle["high"]
-            liquidity_taken = False
-
-            for j in range(i + 1, len(df)):
-                if not liquidity_taken:
-                    if df.iloc[j]["low"] < ref_low:
-                        liquidity_taken = True
-                else:
-                    if df.iloc[j]["close"] > ref_high:
-                        return "long", ref_high
+        next_candle = df.iloc[i + 1]
 
         # ── SHORT (Yeşil ana mum) ──
-        elif candle["close"] > candle["open"]:
+        if candle["close"] > candle["open"]:
             ref_high = candle["high"]
             ref_low  = candle["low"]
-            liquidity_taken = False
 
-            for j in range(i + 1, len(df)):
-                if not liquidity_taken:
-                    if df.iloc[j]["high"] > ref_high:
-                        liquidity_taken = True
-                else:
-                    if df.iloc[j]["close"] < ref_low:
+            # Hemen sonraki mum KIRMIZI olmalı ve high'ı geçmeli
+            if next_candle["close"] < next_candle["open"] and next_candle["high"] > ref_high:
+                # i+2'den itibaren kırılım var mı?
+                for k in range(i + 2, len(df)):
+                    if df.iloc[k]["close"] < ref_low:
                         return "short", ref_low
+
+        # ── LONG (Kırmızı ana mum) ──
+        elif candle["close"] < candle["open"]:
+            ref_low  = candle["low"]
+            ref_high = candle["high"]
+
+            # Hemen sonraki mum YEŞİL olmalı ve low'u geçmeli
+            if next_candle["close"] > next_candle["open"] and next_candle["low"] < ref_low:
+                # i+2'den itibaren kırılım var mı?
+                for k in range(i + 2, len(df)):
+                    if df.iloc[k]["close"] > ref_high:
+                        return "long", ref_high
 
     return None, None
 
@@ -231,7 +218,7 @@ def run_scan():
                 if signal and entry_price:
                     prev = sent_signals.get(key)
                     if prev and prev == (signal, round(entry_price, 6)):
-                        continue  # Aynı sinyal tekrar gönderilmesin
+                        continue
 
                     send_telegram(build_message(symbol, tf_label, signal, entry_price))
                     sent_signals[key] = (signal, round(entry_price, 6))
