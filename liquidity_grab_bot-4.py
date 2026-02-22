@@ -1,4 +1,3 @@
-import os
 import time
 import logging
 import requests
@@ -11,8 +10,8 @@ logging.basicConfig(
 )
 log = logging.getLogger()
 
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN   = "8407067459:AAGgGmH9jA6TwWHY-H62n6s9SKl3Bv0r1Mg"
+TELEGRAM_CHAT_ID = "623705923"
 
 TIMEFRAMES = {
     "1H": "1h",
@@ -227,9 +226,6 @@ def run_scan():
 
 
 def main():
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise ValueError("TELEGRAM_TOKEN ve TELEGRAM_CHAT_ID environment variable olarak tanımlanmalı!")
-
     log.info("LİKİDİTE KAPMA SİNYAL BOTU BAŞLADI - BİNANCE")
     log.info(f"Top {TOP_N} Coin | 1H / 2H / 4H | Her {SCAN_EVERY // 60} dakikada bir")
 
