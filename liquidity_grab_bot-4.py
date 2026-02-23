@@ -219,15 +219,12 @@ def run_scan():
 
                 if signal and entry_price:
                     prev = sent_signals.get(key)
-                    if prev and prev == (signal, round(entry_price, 8)):
+                    if prev and prev == signal:
                         continue
                     send_telegram(build_message(symbol, tf_label, signal, entry_price))
-                    sent_signals[key] = (signal, round(entry_price, 8))
+                    sent_signals[key] = signal
                     found += 1
                     log.info(f"[{symbol}][{tf_label}] {signal.upper()} | Giriş: {entry_price}")
-                else:
-                    if key in sent_signals:
-                        del sent_signals[key]
 
                 time.sleep(0.2)
 
